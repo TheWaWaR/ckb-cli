@@ -11,7 +11,10 @@ use crossbeam_channel::bounded;
 use plugin_protocol::{JsonrpcError, KeyStoreRequest, PluginRequest, PluginResponse};
 
 use super::manager::PluginHandler;
-use crate::utils::other::{get_key_store, serialize_signature};
+use crate::utils::{
+    other::{get_key_store, serialize_signature},
+    index::IndexController,
+};
 
 pub const ERROR_KEYSTORE_REQUIRE_PASSWORD: &str = "keystore require password";
 
@@ -278,7 +281,7 @@ pub(crate) struct DefaultIndexer {
 }
 
 impl DefaultIndexer {
-    pub(crate) fn start() -> Result<DefaultIndexer, String> {
+    pub(crate) fn start(index_controller: IndexController) -> Result<DefaultIndexer, String> {
         // TODO:
         let (sender, _receiver) = bounded(1);
         let thread = thread::spawn(|| {});

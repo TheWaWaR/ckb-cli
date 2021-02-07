@@ -293,8 +293,8 @@ pub enum IndexerRequest {
     LiveCells {
         index: LiveCellIndexType,
         hash: H256,
-        from_number: Option<u64>,
-        to_number: Option<u64>,
+        key_prefix: JsonBytes,
+        key_start: JsonBytes,
         limit: u64,
     },
     TopN(u64),

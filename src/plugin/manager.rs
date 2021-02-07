@@ -19,7 +19,10 @@ use ckb_types::{bytes::Bytes, core::service::Request, H160, H256};
 use crossbeam_channel::{bounded, select, Sender};
 
 use super::builtin::{DefaultIndexer, DefaultKeyStore, ERROR_KEYSTORE_REQUIRE_PASSWORD};
-use crate::utils::other::read_password;
+use crate::utils::{
+    other::read_password,
+    index::IndexController,
+};
 use plugin_protocol::{
     CallbackName, CallbackRequest, CallbackResponse, IndexerRequest, JsonrpcError, JsonrpcRequest,
     JsonrpcResponse, KeyStoreRequest, LiveCellIndexType, PluginConfig, PluginRequest,
@@ -99,12 +102,15 @@ impl PluginManager {
         Ok(plugins)
     }
 
-    pub fn init(ckb_cli_dir: &PathBuf, rpc_url: String) -> Result<PluginManager, String> {
+    pub fn init(
+        ckb_cli_dir: &PathBuf,
+        rpc_url: String,
+        index_controller: IndexController,
+    ) -> Result<PluginManager, String> {
         let plugin_dir = ckb_cli_dir.join(PLUGINS_DIRNAME);
         let plugins = Self::load(ckb_cli_dir).map_err(|err| err.to_string())?;
         let default_keystore = DefaultKeyStore::start(ckb_cli_dir)?;
-        // TODO: impl indexer thread
-        let default_indexer = DefaultIndexer::start()?;
+        let default_indexer = DefaultIndexer::start(index_controller)?;
 
         // Make sure ServiceProvider start before all daemon processes
         let mut daemon_plugins = Vec::new();

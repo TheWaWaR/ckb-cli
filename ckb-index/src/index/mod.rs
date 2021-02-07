@@ -246,7 +246,7 @@ impl<'a> IndexDatabase<'a> {
         let mut infos = Vec::new();
         for (idx, (key_bytes, value_bytes)) in reader.iter_from(&key_start).enumerate() {
             if key_bytes[..key_prefix.len()] != key_prefix[..] {
-                log::debug!("Reach the end of this lock");
+                log::debug!("Reach the end of this serach");
                 break;
             }
             let out_point = OutPoint::new_unchecked(value_bytes.into());
