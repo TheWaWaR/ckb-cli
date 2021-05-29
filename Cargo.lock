@@ -379,6 +379,7 @@ name = "ckb-cli"
 version = "0.42.1"
 dependencies = [
  "ansi_term",
+ "anyhow",
  "atty",
  "byteorder",
  "chrono",
@@ -392,6 +393,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-resource",
  "ckb-sdk",
+ "ckb-sdk-types",
  "ckb-types",
  "ckb-util",
  "clap",
@@ -424,6 +426,7 @@ dependencies = [
  "shell-words",
  "termion",
  "tokio 1.6.0",
+ "toml",
  "tui",
  "url 1.7.2",
  "yaml-rust",
