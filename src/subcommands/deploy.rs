@@ -12,9 +12,8 @@ use ckb_index::{CellIndex, IndexDatabase, LiveCellInfo};
 use ckb_jsonrpc_types as json_types;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::{
-    constants::ONE_CKB,
-    Address, GenesisInfo, HttpRpcClient, HumanCapacity, MultisigConfig, NetworkType, SignerFn,
-    TxHelper,
+    constants::ONE_CKB, Address, AddressPayload, GenesisInfo, HttpRpcClient, HumanCapacity,
+    MultisigConfig, NetworkType, SignerFn, TxHelper,
 };
 use ckb_sdk_types::{
     deployment::{
@@ -24,7 +23,7 @@ use ckb_sdk_types::{
 };
 use ckb_types::{
     bytes::Bytes,
-    core::{BlockView, Capacity, ScriptHashType, TransactionBuilder, FeeRate},
+    core::{BlockView, Capacity, FeeRate, ScriptHashType, TransactionBuilder},
     packed,
     prelude::*,
     H160, H256,
@@ -42,8 +41,8 @@ use crate::utils::{
     },
     index::{with_db, IndexController},
     other::{
-        calculate_type_id, get_keystore_signer, get_live_cell_with_cache,
-        get_max_mature_number, get_network_type, get_privkey_signer, is_mature, read_password,
+        calculate_type_id, get_keystore_signer, get_live_cell_with_cache, get_max_mature_number,
+        get_network_type, get_privkey_signer, is_mature, read_password,
     },
 };
 
@@ -129,7 +128,7 @@ impl<'a> DeploySubCommand<'a> {
                             .validator(|input| AddressParser::new_sighash().validate(input))
                             .about("Collect cells from this address (short sighash address)")
                     )
-                    .arg(arg::tx_fee().required(true))
+                    .arg(arg::fee_rate().required(true))
                     .arg(arg_deployment.clone())
                     .arg(arg_info_file.clone().validator(|input| FilePathParser::new(false).validate(input)))
                     .arg(arg_migration_dir.clone())
@@ -170,7 +169,7 @@ impl<'a> CliSubCommand for DeploySubCommand<'a> {
                 let from_address: Address = AddressParser::new_sighash()
                     .set_network(network)
                     .from_matches(m, "from-address")?;
-                let tx_fee: u64 = CapacityParser.from_matches(m, "tx-fee")?;
+                let fee_rate: u64 = CapacityParser.from_matches(m, "fee-rate")?;
                 let deployment_config: PathBuf =
                     FilePathParser::new(true).from_matches(m, "deployment-config")?;
                 let migration_dir: PathBuf =
@@ -218,7 +217,7 @@ impl<'a> CliSubCommand for DeploySubCommand<'a> {
                     build_tx(
                         &from_address,
                         &mut collector,
-                        tx_fee,
+                        fee_rate,
                         cell_deps.clone(),
                         &lock_script,
                         &cell_changes,
@@ -258,7 +257,7 @@ impl<'a> CliSubCommand for DeploySubCommand<'a> {
                     build_tx(
                         &from_address,
                         &mut collector,
-                        tx_fee,
+                        fee_rate,
                         cell_deps,
                         &lock_script,
                         &dep_group_changes,
@@ -986,63 +985,37 @@ fn build_tx<T: DeployInfo>(
     }
     if inputs.is_empty() {
         return Err(anyhow!(
-            "Capacity(mature) not enough from {}, required: {}",
+            "Capacity(mature) not enough from {}, require more than {}",
             from_address,
             to_capacity,
         ));
     }
-
-    let mut from_capacity: u64 = input_capacities.into_iter().sum();
-    if !enough_capacity(from_capacity, to_capacity) {
-        let needed_capacity = if to_capacity > from_capacity {
-            to_capacity - from_capacity
-        } else {
-            // may need one more cell to fit the tx_fee
-            0
-        };
-        let (more_infos, more_capacity) =
-            collector.collect_live_cells(from_lock_hash, needed_capacity, true)?;
-        inputs.extend(more_infos.into_iter().map(|info| info.input()));
-        from_capacity += more_capacity;
-    }
-    if to_capacity > from_capacity {
-        return Err(anyhow!(
-            "Capacity(mature) not enough: {} => {}",
-            from_address,
-            from_capacity,
-        ));
-    }
-
     let first_cell_input = &inputs[0];
-    let (mut outputs, mut outputs_data): (Vec<_>, Vec<_>) = infos
+    let (outputs, outputs_data): (Vec<_>, Vec<_>) = infos
         .iter()
         .filter_map(|info| info.build_cell_output(lock_script, first_cell_input))
         .unzip();
-
-    let rest_capacity = from_capacity - to_capacity;
-    let from_script: packed::Script = from_address.payload().into();
-    if rest_capacity >= from_script.occupied_capacity().expect("capacity").as_u64() {
-        let change_output = packed::CellOutput::new_builder()
-            .capacity(Capacity::shannons(rest_capacity).pack())
-            .lock(from_script)
-            .build();
-        outputs.push(change_output);
-        outputs_data.push(Bytes::default());
-    } else if rest_capacity >= WARN_FEE_CAPACITY {
-        eprintln!(
-            "WARNING: current transaction fee = {} CKB, not enough live cell to reduce transaction fee to less than {} CKB, try to transfer some capacity to this address",
-            HumanCapacity(rest_capacity),
-            HumanCapacity(WARN_FEE_CAPACITY),
-        );
-    }
-
-    let tx = TransactionBuilder::default()
+    let init_input_total_capacity: u64 = input_capacities.into_iter().sum();
+    let base_tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
         .inputs(inputs)
         .outputs(outputs)
         .outputs_data(outputs_data.into_iter().map(|data| data.pack()))
-        .build();
-    Ok(Some(tx.data()))
+        .build()
+        .data();
+    let (final_tx, input_total_capacity, output_total_capacity) = tx_adjust_fee(
+        base_tx,
+        init_input_total_capacity,
+        collector,
+        fee_rate,
+        from_address.payload(),
+    )?;
+    log::info!(
+        "transaction fee: {}",
+        HumanCapacity(input_total_capacity - output_total_capacity)
+    );
+    assert!(input_total_capacity > output_total_capacity);
+    Ok(Some(final_tx))
 }
 
 fn tx_fill_inputs(
@@ -1056,7 +1029,12 @@ fn tx_fill_inputs(
         .outputs()
         .into_iter()
         .zip(base_tx.raw().outputs_data().into_iter())
-        .map(|(output, data)| output.occupied_capacity(Capacity::bytes(data.len()).unwrap()).unwrap().as_u64())
+        .map(|(output, data)| {
+            output
+                .occupied_capacity(Capacity::bytes(data.len()).unwrap())
+                .unwrap()
+                .as_u64()
+        })
         .sum();
     let new_tx = if output_total_capacity > input_total_capacity {
         let (more_infos, more_capacity) = collector.collect_live_cells(
@@ -1065,7 +1043,7 @@ fn tx_fill_inputs(
             true,
         )?;
         let more_inputs: Vec<_> = more_infos.into_iter().map(|info| info.input()).collect();
-        input_total_capacity + more_capacity;
+        input_total_capacity += more_capacity;
         base_tx
             .as_advanced_builder()
             .inputs(more_inputs.pack())
@@ -1089,7 +1067,7 @@ fn tx_adjust_fee(
     let from_lock = packed::Script::from(from_address_payload);
     let from_lock_hash: H256 = from_lock.calc_script_hash().unpack();
 
-    let (filled_tx, input_total_capacity, mut output_total_capacity) = tx_fill_inputs(
+    let (filled_tx, input_total_capacity, output_total_capacity) = tx_fill_inputs(
         base_tx,
         init_input_total_capacity,
         from_lock_hash.clone(),
@@ -1108,50 +1086,74 @@ fn tx_adjust_fee(
     let min_fee = fee_rate.fee(tx_size).as_u64();
     let delta_capacity = input_total_capacity - output_total_capacity;
     if min_fee == delta_capacity {
-        log::info!("transaction fee just fit perfectly!");
-        return Ok((filled_tx, input_total_capacity, output_total_capacity))
+        log::info!("transaction fee fit perfectly!");
+        return Ok((filled_tx, input_total_capacity, output_total_capacity));
     }
 
-    let base_change_cell_output = packed::CellOutput::new_builder()
-        .lock(from_script)
-        .build();
+    let base_change_cell_output = packed::CellOutput::new_builder().lock(from_lock).build();
     let input_serialized_size = packed::CellInput::default().as_slice().len();
-    let change_output_serialized_size = base_change_cell_output.as_slice().len() + MOLECULE_NUMBER_SIZE;
-    let change_cell_occupied_capacity = base_change_cell_output.occupied_capacity(Capacity::zero()).unwrap().as_u64();
+    let change_output_serialized_size =
+        base_change_cell_output.as_slice().len() + MOLECULE_NUMBER_SIZE;
+    let change_cell_occupied_capacity = base_change_cell_output
+        .occupied_capacity(Capacity::zero())
+        .unwrap()
+        .as_u64();
 
-    // No more live cells
-    if collector.collect_one(from_lock_hash, false)?.0.is_empty() && min_fee > delta_capacity {
+    if collector
+        .collect_one(from_lock_hash.clone(), false)?
+        .0
+        .is_empty()
+        && min_fee > delta_capacity
+    {
         return Err(anyhow!("No more live cells to pay transaction fee"));
     }
-    if min_fee < delta_capacity && (delta_capacity - min_fee) <= fee_rate.fee(input_serialized_size + change_output_serialized_size){
+    if min_fee < delta_capacity
+        && (delta_capacity - min_fee)
+            <= fee_rate
+                .fee(input_serialized_size + change_output_serialized_size)
+                .as_u64()
+    {
         log::info!("fee rate too high no need to adjust it by collect more inputs");
         return Ok((filled_tx, input_total_capacity, output_total_capacity));
     }
 
-    let mut more_infos = Vec::new();
-    let mut more_capacity: u64 = 0;
+    let mut extra_infos: Vec<LiveCellInfo> = Vec::new();
+    let mut extra_capacity: u64 = 0;
     loop {
-        // Add one more input and one more output
-        let final_tx_size = tx_size + input_serialized_size * more_infos.len() + change_output_serialized_size;
+        let final_tx_size =
+            tx_size + input_serialized_size * extra_infos.len() + change_output_serialized_size;
         let final_min_fee = fee_rate.fee(final_tx_size).as_u64();
-        let final_delta_capacity = delta_capacity + more_capacity;
+        let final_delta_capacity = delta_capacity + extra_capacity;
         if final_delta_capacity >= change_cell_occupied_capacity + final_min_fee {
             log::info!("have enough capacity for change cell");
             let change_capacity = final_delta_capacity - final_min_fee;
-            let change_output = base_change_cell_output.as_builder()
+            let change_output = base_change_cell_output
+                .as_builder()
                 .capacity(Capacity::shannons(change_capacity).pack())
                 .build();
-            let final_tx = filled_tx.as_advanced_builder()
-                .inputs(more_infos.into_iter().map(|info| info.input()))
+            let final_tx = filled_tx
+                .as_advanced_builder()
+                .inputs(extra_infos.into_iter().map(|info| info.input()))
                 .output(change_output)
                 .output_data(Bytes::default().pack())
                 .build()
                 .data();
-            return Ok((final_tx, input_total_capacity + more_capacity, output_total_capacity + change_capacity));
+            return Ok((
+                final_tx,
+                input_total_capacity + extra_capacity,
+                output_total_capacity + change_capacity,
+            ));
         } else {
+            if extra_infos.len() >= 5 {
+                return Err(anyhow!("load >= 5 extra input cells, something is wrong!"));
+            }
+
             log::info!("try to collect one more live cell");
-            let (rest_infos, rest_capacity) = collector.collect_one(from_lock_hash, true)?;
-            if rest_infos.is_empty() && final_delta_capacity < change_cell_occupied_capacity + final_min_fee {
+            let (more_infos, more_capacity) =
+                collector.collect_one(from_lock_hash.clone(), true)?;
+            if more_infos.is_empty()
+                && final_delta_capacity < change_cell_occupied_capacity + final_min_fee
+            {
                 log::info!("have no capacity for change cell");
                 if final_delta_capacity >= WARN_FEE_CAPACITY {
                     eprintln!(
@@ -1161,14 +1163,19 @@ fn tx_adjust_fee(
                     );
                 }
                 // no cpacity for put the change cell
-                let final_tx = filled_tx.as_advanced_builder()
-                    .inputs(more_infos.into_iter().map(|info| info.input()))
+                let final_tx = filled_tx
+                    .as_advanced_builder()
+                    .inputs(extra_infos.into_iter().map(|info| info.input()))
                     .build()
                     .data();
-                return Ok((final_tx, input_total_capacity + more_capacity, output_total_capacity));
+                return Ok((
+                    final_tx,
+                    input_total_capacity + extra_capacity,
+                    output_total_capacity,
+                ));
             }
-            more_infos.extend(rest_infos);
-            more_capacity += rest_capacity;
+            extra_infos.extend(more_infos);
+            extra_capacity += more_capacity;
         }
     }
 }
@@ -1703,7 +1710,11 @@ impl<'a> CellCollector<'a> {
         }
     }
 
-    pub fn collect_one(&mut self, lock_hash: H256, lock_collected_cells: bool) -> Result<(Vec<LiveCellInfo>, u64)> {
+    pub fn collect_one(
+        &mut self,
+        lock_hash: H256,
+        lock_collected_cells: bool,
+    ) -> Result<(Vec<LiveCellInfo>, u64)> {
         self.collect_live_cells(lock_hash, 1, lock_collected_cells)
     }
 
