@@ -3,7 +3,6 @@ use std::convert::TryFrom;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use ckb_jsonrpc_types as json_types;
 use ckb_sdk::{
