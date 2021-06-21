@@ -438,8 +438,8 @@ impl MultisigConfig {
         self.sighash_addresses
             .iter()
             .map(|address| match address {
-                AddressPayload::Short { args, index } if *index == CodeHashIndex::Sighash => {
-                    H160::from_slice(args.as_ref()).unwrap()
+                AddressPayload::Short { hash, index } if *index == CodeHashIndex::Sighash => {
+                    hash.clone()
                 }
                 _ => panic!("MultisigConfig sighash_addresses have invalid address format"),
             })
@@ -460,7 +460,7 @@ impl MultisigConfig {
             args.extend_from_slice(&since_value.to_le_bytes()[..]);
             AddressPayload::new_full_type(MULTISIG_TYPE_HASH.pack(), args.freeze())
         } else {
-            AddressPayload::new_multisig(&hash160)
+            AddressPayload::new_short_multisig(hash160)
         }
     }
 
