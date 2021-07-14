@@ -88,10 +88,7 @@ impl AddressPayload {
     }
 
     pub fn is_sighash(&self) -> bool {
-        match self {
-            AddressPayload::Short { index, .. } if *index == CodeHashIndex::Sighash => true,
-            _ => false,
-        }
+        matches!(self, AddressPayload::Short { index, .. } if *index == CodeHashIndex::Sighash)
     }
 
     pub fn ty(&self) -> AddressType {

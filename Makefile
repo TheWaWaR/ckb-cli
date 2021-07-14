@@ -22,7 +22,9 @@ integration:
 prod: ## Build binary with release profile.
 	cargo build --release
 
-security-audit: ## Use cargo-deny to audit Cargo.lock for crates with security vulnerabilities.
-	cargo deny check --hide-inclusion-graph --show-stats advisories sources
+security-audit: ## Use cargo-audit to audit Cargo.lock for crates with security vulnerabilities.
+	@cargo +nightly install cargo-audit
+	cargo audit
+	# expecting to see "Success No vulnerable packages found"
 
 .PHONY: test clippy fmt integration ci prod security-audit
